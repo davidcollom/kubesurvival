@@ -26,13 +26,21 @@ func (s *KubernetesSimulator) Simulate(pods []*v1.Pod, nodes []nodesource.Node) 
 		nodeConfigs = append(nodeConfigs, *node.GetNodeConfig(nodeName))
 	}
 
+	// file, _ := os.Create(fmt.Sprintf("./%s", nodes[0].GetInstanceType()))
+	// _ = file
+
 	clusterConfig := &config.Config{
-		LogLevel:      "info",
+		LogLevel: "info",
+		// LogLevel:      "debug",
 		StartClock:    time.Now().Format(time.RFC3339),
 		Tick:          10,
 		MetricsTick:   60,
 		MetricsLogger: []config.MetricsLoggerConfig{},
-		Cluster:       nodeConfigs,
+		// MetricsLogger: []config.MetricsLoggerConfig{{Dest: "stderr", Formatter: "humanReadable"}},
+		// MetricsLogger: []config.MetricsLoggerConfig{{Dest: file.Name(), Formatter: "humanReadable"}},
+		// MetricsLogger: []config.MetricsLoggerConfig{{Dest: fmt.Sprintf("./%s.log", nodes[0].GetInstanceType()), Formatter: "humanReadable"}},
+		// MetricsLogger: []config.MetricsLoggerConfig{{Dest: fmt.Sprintf("./%s-%s.log", nodes[0].GetInstanceType(), time.Now()), Formatter: "humanReadable"}},
+		Cluster: nodeConfigs,
 	}
 
 	kubesim, err := kubesim.NewKubeSim(clusterConfig, queue, sched)

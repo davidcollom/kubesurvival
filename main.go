@@ -5,24 +5,47 @@ import (
 	"io/ioutil"
 	"math"
 	"os"
+	"sort"
+	"time"
 
 	"github.com/aporia-ai/kubesurvival/v2/pkg/kubesimulator"
 	"github.com/aporia-ai/kubesurvival/v2/pkg/nodesource"
 	"github.com/aporia-ai/kubesurvival/v2/pkg/parser"
 	"github.com/aporia-ai/kubesurvival/v2/pkg/podgen"
+	"github.com/dustin/go-humanize"
+	"github.com/olekukonko/tablewriter"
+	"github.com/schollz/progressbar/v3"
+
 	"gopkg.in/yaml.v2"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 type Config struct {
-	Nodes struct {
-		AWS struct {
-			Region        string   `yaml:"region"`
-			InstanceTypes []string `yaml:"instanceTypes"`
-		} `yaml:"aws"`
+	Provider string `yaml:"provider"`
+	Mode     string `yaml:"mode"`
+	Nodes    struct {
+		MinNodes *int            `yaml:"minNodes"`
+		MaxNodes *int            `yaml:"maxNodes"`
+		GCP      *ProviderConfig `yaml:"gcp,omitempty"`
+		AWS      *ProviderConfig `yaml:"aws,omitempty"`
 	} `yaml:"nodes"`
 	Pods string `yaml:"pods"`
+}
+type ProviderConfig struct {
+	Region        string   `yaml:"region"`
+	InstanceTypes []string `yaml:"instanceTypes"`
+}
+
+func (c *Config) GetProviderConfig() ProviderConfig {
+	switch c.Provider {
+	case "aws":
+		return *c.Nodes.AWS
+	case "gcp":
+		return *c.Nodes.GCP
+	default:
+		return *c.Nodes.AWS
+	}
 }
 
 type Result struct {
@@ -71,10 +94,14 @@ func main() {
 	}
 
 	// Generate nodes
-	ns := &nodesource.AWSNodeSource{
-		AWSRegion:     config.Nodes.AWS.Region,
-		InstanceTypes: config.Nodes.AWS.InstanceTypes,
-	}
+	// ns := &nodesource.AWSNodeSource{
+	// 	Region:     config.Nodes.AWS.Region,
+	// 	InstanceTypes: config.Nodes.AWS.InstanceTypes,
+	// }
+	ns := nodesource.GetNodeSource(config.Provider)
+	ns.SetRegion(config.GetProviderConfig().Region)
+	ns.SetNodeTypes(config.GetProviderConfig().InstanceTypes)
+	fmt.Printf("Using Provider: %s\n", ns.Name())
 
 	nodeTypes, err := ns.GetNodes()
 	if err != nil {
@@ -88,21 +115,42 @@ func main() {
 		fmt.Printf("[!] No nodes are available for simulation.\n")
 		return
 	}
+	fmt.Printf("Simulating (%v pods) with %v NodesTypes\n", len(pods), len(filteredNodeTypes))
+	// Create a new progress bar
+	bar := progressbar.NewOptions(len(filteredNodeTypes)+1,
+		progressbar.OptionSetDescription("Simulating..."),
+		progressbar.OptionSetWriter(os.Stderr),
+		progressbar.OptionShowBytes(false),
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionClearOnFinish(),
+		// progressbar.OptionShowIts(),
+		progressbar.OptionThrottle(2*time.Second),
+	)
+	bar.Add(1) // Just so that we get the graph to show
 
 	// Main loop
-	var result *Result
+	var results []Result
+	var simRuns int64
+	// var maxtotalPricePerMonth float64
 	for _, nodeType := range filteredNodeTypes {
 		// We never want a cluster with only 1 node
-		nodeCount := 2
+		var nodeCount int
+		if config.Nodes.MinNodes == nil {
+			nodeCount = 2
+		} else {
+			nodeCount = *config.Nodes.MinNodes
+		}
 
 		for {
 			// Calculate total price per month
+			// fmt.Println(nodeType.GetHourlyPrice(), nodeType.GetInstanceType(), nodeCount)
 			totalPricePerMonth := float64(nodeCount) * nodeType.GetHourlyPrice() * 24 * 31
+			// fmt.Println(nodeType.GetInstanceType(), maxtotalPricePerMonth, totalPricePerMonth)
 
 			// Do we even need to simulate?
-			if result != nil && totalPricePerMonth > result.TotalPricePerMonth {
-				break
-			}
+			// if totalPricePerMonth > maxtotalPricePerMonth {
+			// 	break
+			// }
 
 			// Generate a list of nodes from this type
 			nodes := []nodesource.Node{}
@@ -113,67 +161,94 @@ func main() {
 			// Simulate cluster
 			simulator := &kubesimulator.KubernetesSimulator{}
 			isSimulationSuccessful, err := simulator.Simulate(pods, nodes)
+			simRuns++
 			if err != nil {
 				fmt.Printf("[!] Failed to simulate a Kubernetes cluster: %s\n", err)
-				return
+				// return
 			}
 
 			if isSimulationSuccessful {
-				result = &Result{
-					InstanceType:       nodeType.InstanceType,
+				results = append(results, Result{
+					InstanceType:       nodeType.GetInstanceType(),
 					NodeCount:          nodeCount,
 					TotalPricePerMonth: totalPricePerMonth,
-				}
-
+				})
+				bar.Add(1)
+				// fmt.Printf("Successfully Scheduled on %s, %v, %.2f\n", nodeType.GetInstanceType(), nodeCount, totalPricePerMonth)
 				break
 			}
 
 			// Simple heuristic as an alternative to nodeCount++ to make convergence faster.
-			nodeCount += int(math.Max(float64(nodeCount)/15, 1))
+
+			if config.Mode == "fast" {
+				nodeCount += int(math.Max(float64(nodeCount)/15, 1))
+			} else {
+				nodeCount++
+			}
+
+			if config.Nodes.MaxNodes != nil && nodeCount >= *config.Nodes.MaxNodes {
+				bar.Add(1)
+				fmt.Printf("Instance type %s reached limit of 1000 Nodes\n", nodeType.GetInstanceType())
+				break
+			}
 		}
 	}
 
-	if result != nil {
-		fmt.Printf("Instance type: %s\n", result.InstanceType)
-		fmt.Printf("Node count: %d\n", result.NodeCount)
-		fmt.Printf("Total Price per Month: USD $%.2f\n", result.TotalPricePerMonth)
+	if len(results) != 0 {
+		fmt.Printf("Completed %s Simulations!\n", humanize.Comma(simRuns))
+		table := tablewriter.NewWriter(os.Stdout)
+		table.SetHeader([]string{"Instance Type", "Node Count", "Price/month (USD)"})
+
+		sort.Slice(results, func(i, j int) bool {
+			if results[i].TotalPricePerMonth == results[j].TotalPricePerMonth {
+				return results[i].NodeCount < results[j].NodeCount
+			}
+			return results[i].TotalPricePerMonth < results[j].TotalPricePerMonth
+		})
+
+		for _, v := range results {
+			table.Append([]string{v.InstanceType, fmt.Sprintf("%v", v.NodeCount), humanize.FormatFloat("#,###.###", v.TotalPricePerMonth)})
+		}
+		table.Render()
 	} else {
-		fmt.Printf("[!] Could not converge to a solution.\n")
+		fmt.Printf("[!] Could not converge to a solution over %v Simulations.\n", simRuns)
 	}
 }
 
-func filterNodeTypes(nodeTypes []*nodesource.AWSNode, pods []*v1.Pod) []*nodesource.AWSNode {
-	result := []*nodesource.AWSNode{}
+func filterNodeTypes(nodeTypes []nodesource.Node, pods []*v1.Pod) []nodesource.Node {
+	var result []nodesource.Node
 	for _, nodeType := range nodeTypes {
+		// nodeType = nodeType.(*nodesource.AWSNode)
 		nodeHasEnoughResources := true
 
 		for _, pod := range pods {
 			// Is Pod CPU > Node CPU?
-			nodeCpu := resource.MustParse(nodeType.GetNodeConfig("node").Status.Allocatable["cpu"])
+			nodeConfig := nodeType.GetNodeConfig("node")
+			nodeCpu := resource.MustParse(nodeConfig.Status.Allocatable["cpu"])
 			podCpu := pod.Spec.Containers[0].Resources.Requests.Cpu()
 			if podCpu.Cmp(nodeCpu) > 0 {
 				fmt.Printf("WARNING: Ignoring node type %s with %s CPU because there's a pod with more CPU: %s\n",
-					nodeType.InstanceType, nodeCpu.String(), podCpu.String())
+					nodeType.GetInstanceType(), nodeCpu.String(), podCpu.String())
 				nodeHasEnoughResources = false
 				break
 			}
 
 			// Is Pod Memory > Node Memory?
-			nodeMemory := resource.MustParse(nodeType.GetNodeConfig("node").Status.Allocatable["memory"])
+			nodeMemory := resource.MustParse(nodeConfig.Status.Allocatable["memory"])
 			podMemory := pod.Spec.Containers[0].Resources.Requests.Memory()
 			if podMemory.Cmp(nodeMemory) > 0 {
-				fmt.Printf("WARNING: Ignoring node type %s with %s memory because there's a pod with more memory: %s\n",
-					nodeType.InstanceType, nodeMemory.String(), podMemory.String())
+				fmt.Printf("WARNING: Ignoring node type %s with %s Memory because there's a pod with more memory: %s\n",
+					nodeType.GetInstanceType(), nodeMemory.String(), podMemory.String())
 				nodeHasEnoughResources = false
 				break
 			}
 
 			// Is Pod Memory > Node Memory?
-			nodeGpu := resource.MustParse(nodeType.GetNodeConfig("node").Status.Allocatable["nvidia.com/gpu"])
+			nodeGpu := resource.MustParse(nodeConfig.Status.Allocatable["nvidia.com/gpu"])
 			podGpu := pod.Spec.Containers[0].Resources.Requests["nvidia.com/gpu"]
 			if podGpu.Cmp(nodeGpu) > 0 {
 				fmt.Printf("WARNING: Ignoring node type %s with %s GPU because there's a pod with more GPU: %s\n",
-					nodeType.InstanceType, nodeGpu.String(), podGpu.String())
+					nodeType.GetInstanceType(), nodeGpu.String(), podGpu.String())
 				nodeHasEnoughResources = false
 				break
 			}

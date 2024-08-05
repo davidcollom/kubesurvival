@@ -2,8 +2,9 @@ package nodesource
 
 import (
 	"bufio"
+	"bytes"
+	_ "embed"
 	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
 
@@ -13,6 +14,10 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+//go:generate curl -o eni-max-pods.txt https://raw.githubusercontent.com/aws/amazon-vpc-cni-k8s/master/misc/eni-max-pods.txt
+//go:embed eni-max-pods.txt
+var maxPodsData []byte
 
 type AWSNode struct {
 	InstanceType  string   `json:"instanceType"`
@@ -26,17 +31,23 @@ type AWSNode struct {
 }
 
 type AWSNodeSource struct {
-	AWSRegion           string
+	Region              string
 	InstanceTypes       []string
 	VolumeSizePerNodeGB int64 // TODO
 }
 
-type fetchPriceAsyncResult struct {
-	node *AWSNode
-	err  error
+func (s *AWSNodeSource) Name() string {
+	return "AWS"
 }
 
-func (s *AWSNodeSource) GetNodes() ([]*AWSNode, error) {
+func (s *AWSNodeSource) SetRegion(region string) {
+	s.Region = region
+}
+func (s *AWSNodeSource) SetNodeTypes(nodeTypes []string) {
+	s.InstanceTypes = nodeTypes
+}
+
+func (s *AWSNodeSource) GetNodes() ([]Node, error) {
 	instances, err := ec2instancesinfo.Data()
 	if err != nil {
 		return nil, errors.Wrap(err, "could not get ec2 instances info")
@@ -47,22 +58,24 @@ func (s *AWSNodeSource) GetNodes() ([]*AWSNode, error) {
 		return nil, errors.Wrap(err, "could not get max pods per instance")
 	}
 
-	nodes := []*AWSNode{}
+	var nodes []Node
 
 	for _, instanceType := range s.InstanceTypes {
 		// Find max pods for this instance
 		maxPods, ok := maxPodsPerInstance[instanceType]
 		if !ok {
-			return nil, errors.New(fmt.Sprintf("Could not find max pods for instance: %s", instanceType))
+			fmt.Printf("could not find max pods for instance: %s, assuming Default of 110", instanceType)
+			maxPods = 110
 		}
 
 		// Find info for this instance
 		found := false
 		for _, instance := range *instances {
 			if instanceType == instance.InstanceType {
+				fmt.Printf("Adding %s to list\n", instance.InstanceType)
 				nodes = append(nodes, &AWSNode{
 					InstanceType:  instance.InstanceType,
-					OnDemandPrice: instance.Pricing[s.AWSRegion].Linux.OnDemand,
+					OnDemandPrice: instance.Pricing[s.Region].Linux.OnDemand,
 					VCPU:          instance.VCPU,
 					Memory:        instance.Memory,
 					GPU:           instance.GPU,
@@ -84,30 +97,15 @@ func (s *AWSNodeSource) GetNodes() ([]*AWSNode, error) {
 }
 
 func (s *AWSNodeSource) getMaxPodsPerInstance() (map[string]int, error) {
-	response, err := http.Get("https://raw.githubusercontent.com/awslabs/amazon-eks-ami/master/files/eni-max-pods.txt")
-	if err != nil {
-		return nil, errors.Wrap(err, "could not fetch max pods list")
-	}
-	defer response.Body.Close()
+	maxPodsPerInstance := map[string]int{}
 
-	maxPodsPerInstance := make(map[string]int)
-
-	// Check status code
-	if response.StatusCode != http.StatusOK {
-		return nil, errors.Wrapf(err, "fetch max pods list did not return 200 (%d instead)", response.StatusCode)
-	}
-
-	// Read and parse response
-	scanner := bufio.NewScanner(response.Body)
+	scanner := bufio.NewScanner(bytes.NewReader(maxPodsData))
 	for scanner.Scan() {
 		line := scanner.Text()
-
-		// Skip comments
 		if strings.HasPrefix(line, "#") {
 			continue
 		}
 
-		// Parse line
 		splitted := strings.Split(line, " ")
 		if len(splitted) != 2 {
 			return nil, errors.Errorf("could not parse eni-max-pods.txt file, bad line: %s", line)
@@ -121,13 +119,16 @@ func (s *AWSNodeSource) getMaxPodsPerInstance() (map[string]int, error) {
 
 		maxPodsPerInstance[instanceType] = int(maxPods)
 	}
-
 	return maxPodsPerInstance, nil
 }
 
 func (n *AWSNode) GetHourlyPrice() float64 {
 	// TODO: Add storage price
 	return n.OnDemandPrice
+}
+
+func (n *AWSNode) GetInstanceType() string {
+	return n.InstanceType
 }
 
 func (n *AWSNode) GetNodeConfig(nodeName string) *config.NodeConfig {

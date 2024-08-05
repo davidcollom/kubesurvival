@@ -1,17 +1,21 @@
+provider: gcp
 nodes:
-  aws:
-    region: us-east-1
-    instanceTypes:
-    - p4d.24xlarge
-    - p3.2xlarge
-    - p3.8xlarge	
-    - p3.16xlarge
-    - p3dn.24xlarge
-    - g4dn.8xlarge
-    - g4dn.16xlarge	
-    - g4dn.12xlarge
-    - g4dn.16xlarge	
-    - g4dn.12xlarge	
+  minNodes: 100
+  maxNodes: 1000
+  gcp:
+    region: europe-west2
+
+    # instanceTypes:
+    # - p4d.24xlarge
+    # - p3.2xlarge
+    # - p3.8xlarge
+    # - p3.16xlarge
+    # - p3dn.24xlarge
+    # - g4dn.8xlarge
+    # - g4dn.16xlarge
+    # - g4dn.12xlarge
+    # - g4dn.16xlarge
+    # - g4dn.12xlarge
 pods: |
   # Global microservice 1
   pod(cpu: "250m", memory: "64Gi", gpu: 2) +
@@ -36,10 +40,10 @@ pods: |
 
     # In each environment, there are 60 instances of something with pod with 32 replicas + another pod
     (
-      32 * pod(cpu: "2200m", memory: "6Gi", gpu: 3) + 
+      32 * pod(cpu: "2200m", memory: "6Gi", gpu: 3) +
       pod(cpu: "100m", memory: "10Gi", gpu: 5)
     ) * 6
-  ) * 3 + 
+  ) * 3 +
 
   # Global microservice 4
   pod(cpu: "2550m", memory: "64Gi", gpu: 1)
