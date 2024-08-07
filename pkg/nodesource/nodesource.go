@@ -14,6 +14,7 @@ type NodeSource interface {
 	Name() string
 	SetRegion(string)
 	SetNodeTypes([]string)
+	UseSpot(bool)
 	GetNodes() ([]Node, error)
 }
 

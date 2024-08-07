@@ -40,6 +40,8 @@ func (s *AWSNodeSource) Name() string {
 	return "AWS"
 }
 
+func (s *AWSNodeSource) UseSpot(bool) {}
+
 func (s *AWSNodeSource) SetRegion(region string) {
 	s.Region = region
 }

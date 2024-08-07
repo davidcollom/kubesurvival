@@ -50,6 +50,7 @@ func (p *Parser) match(tokenTypes ...lexer.TokenType) (*lexer.Token, bool) {
 	return &p.lookahead, false
 }
 
+//nolint:unused,staticcheck
 func (p *Parser) skip() {
 	p.lookahead = p.scanner.Scan()
 }
